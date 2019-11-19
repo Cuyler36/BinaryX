@@ -189,7 +189,7 @@ namespace BinaryX
 
         public override void Write(ulong value) => base.Write(ByteOrder == ByteOrder.BigEndian ? HelperUtils.SwapU64(value) : value);
 
-        public void Write<T>(T structure) where T : struct => base.Write(structure.ToBytes(ByteOrder) as byte[] ?? Array.Empty<byte>());
+        public void WriteStruct<T>(T structure) where T : struct => base.Write(structure.ToBytes(ByteOrder) as byte[] ?? Array.Empty<byte>());
     }
 
     internal static class StructReader
