@@ -48,7 +48,7 @@ namespace BinaryX
             { typeof(double), (dynamic val) => SwapF64(val) },
         };
 
-        internal static unsafe T ToStruct2<T>(this IEnumerable<byte> buffer, ByteOrder defaultEndianness = ByteOrder.Undefined, int offset = 0) where T : struct
+        internal static unsafe T ToStruct<T>(this IEnumerable<byte> buffer, ByteOrder defaultEndianness = ByteOrder.Undefined, int offset = 0) where T : struct
         {
             if (buffer == null) throw new ArgumentNullException($"{nameof(buffer)} cannot be null!");
             if (offset < 0) throw new ArgumentOutOfRangeException($"{nameof(offset)} cannot be less than 0!");
@@ -94,65 +94,6 @@ namespace BinaryX
             return (T)boxedStruct;
         }
 
-        internal static unsafe T ToStruct<T>(this IEnumerable<byte> buffer, ByteOrder defaultEndianness = ByteOrder.Undefined, int offset = 0) where T : struct
-        {
-            if (buffer == null) throw new ArgumentNullException($"{nameof(buffer)} cannot be null!");
-            if (offset < 0) throw new ArgumentOutOfRangeException($"{nameof(offset)} cannot be less than 0!");
-
-            byte[] bufferAsArray;
-
-            if (buffer is byte[] localBuffer)
-            {
-                bufferAsArray = localBuffer;
-            }
-            else
-            {
-                bufferAsArray = buffer.ToArray();
-            }
-
-            T structure;
-            fixed (byte* bufferPointer = bufferAsArray)
-            {
-                structure = Marshal.PtrToStructure<T>((IntPtr)(bufferPointer + offset));
-            }
-
-            // Sort endianness
-            object boxedStruct = structure;
-            var structEndian = typeof(T).GetCustomAttribute<Endianness>()?.ByteOrder ?? ByteOrder.Undefined;
-            foreach (var field in typeof(T).GetFields())
-            {
-                var propEndianness = field.GetCustomAttribute<Endianness>(true)?.ByteOrder ?? ByteOrder.Undefined;
-                if (field.GetCustomAttribute(typeof(FixedBufferAttribute), false) != null)
-                    continue;
-                if (propEndianness == ByteOrder.BigEndian ||
-                    (propEndianness != ByteOrder.LittleEndian && structEndian == ByteOrder.BigEndian) ||
-                    (propEndianness == ByteOrder.Undefined && structEndian == ByteOrder.Undefined && defaultEndianness == ByteOrder.BigEndian))
-                {
-                    var boxedObject = (dynamic)field.GetValue(boxedStruct);
-                    var type = boxedObject.GetType();
-                    if (type.BaseType == typeof(Enum))
-                        type = Enum.GetUnderlyingType(type);
-                    if (type == typeof(sbyte) || type == typeof(byte) || type == typeof(bool))
-                        field.SetValue(boxedStruct, boxedObject);
-                    else if (type == typeof(float))
-                    {
-                        float f = (float)boxedObject;
-                        float* val = &f;
-                        int temp = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(*(int*)val);
-                        var value = *(float*)&temp;
-                        field.SetValue(boxedStruct, value);
-                    }
-                    else
-                    {
-                        var value = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(boxedObject);
-                        field.SetValue(boxedStruct, value);
-                    }
-                }
-            }
-
-            return (T)boxedStruct;
-        }
-
         internal static unsafe IEnumerable<byte> ToBytes<T>(this T structure, ByteOrder defaultEndianness = ByteOrder.Undefined) where T : struct
         {
             // Sort endianness
@@ -162,7 +103,7 @@ namespace BinaryX
             {
                 var propEndianness = field.GetCustomAttribute<Endianness>(true)?.ByteOrder ?? ByteOrder.Undefined;
                 if (propEndianness == ByteOrder.BigEndian ||
-                    (propEndianness != ByteOrder.LittleEndian && structEndian == ByteOrder.BigEndian) || 
+                    (propEndianness != ByteOrder.LittleEndian && structEndian == ByteOrder.BigEndian) ||
                     (propEndianness == ByteOrder.Undefined && structEndian == ByteOrder.Undefined && defaultEndianness == ByteOrder.BigEndian))
                 {
                     var boxedObject = (dynamic)field.GetValue(boxedStruct);
@@ -171,20 +112,7 @@ namespace BinaryX
                         type = Enum.GetUnderlyingType(type);
                     if (type == typeof(sbyte) || type == typeof(byte) || type == typeof(bool))
                         field.SetValue(boxedStruct, field.GetValue(boxedStruct));
-                    else if (type == typeof(float))
-                    {
-                        float f = (float)boxedObject;
-                        float* val = &f;
-                        int temp = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(*(int*)val);
-                        var value = *(float*)&temp;
-                        field.SetValue(boxedStruct, value);
-                    }
-                    else
-                    {
-                        var value = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(
-                            (dynamic)field.GetValue(boxedStruct));
-                        field.SetValue(boxedStruct, value);
-                    }
+                    field.SetValue(boxedStruct, _endiannessSwapDict[type](boxedObject));
                 }
             }
 
@@ -286,8 +214,8 @@ namespace BinaryX
         public double ReadDouble(ByteOrder order) =>
             order == ByteOrder.BigEndian ? HelperUtils.SwapF64(base.ReadDouble()) : base.ReadDouble();
 
-        public T ReadStruct<T>() where T : struct => ReadBytes(Marshal.SizeOf<T>()).ToStruct2<T>(ByteOrder);
-        public T ReadStruct<T>(ByteOrder order) where T : struct => ReadBytes(Marshal.SizeOf<T>()).ToStruct2<T>(order);
+        public T ReadStruct<T>() where T : struct => ReadBytes(Marshal.SizeOf<T>()).ToStruct<T>(ByteOrder);
+        public T ReadStruct<T>(ByteOrder order) where T : struct => ReadBytes(Marshal.SizeOf<T>()).ToStruct<T>(order);
     }
 
     public sealed class BinaryWriterX : BinaryWriter
@@ -335,48 +263,5 @@ namespace BinaryX
 
         public void WriteStruct<T>(T structure) where T : struct => base.Write(structure.ToBytes(ByteOrder) as byte[] ?? Array.Empty<byte>());
         public void WriteStruct<T>(T structure, ByteOrder order) where T : struct => base.Write(structure.ToBytes(order) as byte[] ?? Array.Empty<byte>());
-    }
-
-    internal static class StructReader
-    {
-        internal static T ReadStruct<T>(Stream streamHandle, int readOffset = 0) where T : struct
-        {
-            var buffer = new byte[Marshal.SizeOf<T>()];
-            var structure = default(T);
-
-            try
-            {
-                if (streamHandle.Length >= readOffset + buffer.Length)
-                {
-                    streamHandle.Read(buffer, readOffset, buffer.Length);
-                    structure = buffer.ToStruct<T>();
-                }
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e.Message);
-                Console.WriteLine(e.StackTrace);
-            }
-
-            return structure;
-        }
-    }
-
-    internal static class StructWriter
-    {
-        internal static byte[] WriteStruct<T>(T structure, Stream streamHandle = null, int writeOffset = 0) where T : struct
-        {
-            try
-            {
-                var buffer = structure.ToBytes() as byte[] ?? new byte[0];
-                streamHandle?.Write(buffer, writeOffset, buffer.Length);
-
-                return buffer;
-            }
-            catch
-            {
-                return null;
-            }
-        }
     }
 }
